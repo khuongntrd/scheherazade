@@ -15,10 +15,10 @@ from minio import Minio
 
 from vieneu import Vieneu
 
-REMOTE_API_BASE = os.getenv("REMOTE_API_BASE", "http://100.93.85.78:23333/v1")
-REMOTE_MODEL_ID = os.getenv("REMOTE_MODEL_ID", "pnnbao-ump/VieNeu-TTS-v2")
-DEFAULT_EMOTION = os.getenv("DEFAULT_EMOTION", "natural")
-DEFAULT_VOICE = os.getenv("DEFAULT_VOICE", "Doan")
+TTS_BACKEND = os.getenv("TTS_BACKEND", "auto")  # "onnx" (CPU) | "pytorch" (GPU) | "auto"
+TTS_PRECISION = os.getenv("TTS_PRECISION", "int8")  # ONNX/CPU only: "int8" | "fp32"
+DEFAULT_STYLE = os.getenv("DEFAULT_STYLE", "tu_nhien")
+DEFAULT_VOICE = os.getenv("DEFAULT_VOICE", "Đoan Trang")
 
 API_KEY = os.getenv("API_KEY", "")
 
@@ -28,6 +28,7 @@ MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "p@ssw0rd")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "tts-output")
 MINIO_SECURE = os.getenv("MINIO_SECURE", "false").lower() == "true"
 MINIO_PUBLIC_URL = os.getenv("MINIO_PUBLIC_URL", "").rstrip("/")
+MINIO_REGION = os.getenv("MINIO_REGION", "us-east-1")
 PRESIGNED_EXPIRY_HOURS = int(os.getenv("PRESIGNED_EXPIRY_HOURS", "24"))
 
 app = FastAPI(title="VieNeu TTS API")
@@ -42,12 +43,17 @@ def require_api_key(key: str = Security(_api_key_header)):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 tts = Vieneu(
-    mode="remote",
-    api_base=REMOTE_API_BASE,
-    model_name=REMOTE_MODEL_ID,
-    emotion=DEFAULT_EMOTION,
-    codec_repo="neuphonic/neucodec-onnx-decoder-int8",
+    mode="v3turbo",
+    backend=TTS_BACKEND,
+    precision=TTS_PRECISION,
 )
+
+# v2 emotion values mapped to their closest v3 reading style
+_EMOTION_TO_STYLE = {
+    "natural": "tu_nhien",
+    "storytelling": "doc_truyen",
+    "news": "tin_tuc",
+}
 
 minio_client = Minio(
     MINIO_ENDPOINT,
@@ -58,11 +64,14 @@ minio_client = Minio(
 
 if MINIO_PUBLIC_URL:
     _parsed = urlparse(MINIO_PUBLIC_URL)
+    # region pinned so presigning never phones the public endpoint,
+    # which may be unreachable from inside the container
     minio_presign_client = Minio(
         _parsed.netloc,
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
         secure=_parsed.scheme == "https",
+        region=MINIO_REGION,
     )
 else:
     minio_presign_client = minio_client
@@ -104,7 +113,8 @@ class SynthesizeRequest(BaseModel):
     link: Optional[str] = None
     xpath: Optional[str] = None
     voice: Optional[str] = None
-    emotion: Optional[str] = None
+    style: Optional[str] = None  # "tu_nhien" | "tin_tuc" | "doc_truyen"
+    emotion: Optional[str] = None  # legacy v2 field, mapped to style
     stream: bool = False
     correlation_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
@@ -151,12 +161,12 @@ def synthesize(req: SynthesizeRequest):
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Voice '{voice_id}' not found: {e}")
 
-    infer_kwargs = {}
-    if req.emotion:
-        infer_kwargs["emotion"] = req.emotion
+    style = req.style or DEFAULT_STYLE
+    if req.emotion and not req.style:
+        style = _EMOTION_TO_STYLE.get(req.emotion, req.emotion)
 
     try:
-        audio = tts.infer(text=text, voice=voice_data, **infer_kwargs)
+        audio = tts.infer(text=text, voice=voice_data, style=style)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
 

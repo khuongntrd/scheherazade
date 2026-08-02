@@ -1,18 +1,17 @@
 # Scheherazade
 
-A FastAPI service that wraps [VieNeu TTS](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v2) — a Vietnamese neural text-to-speech model — and exposes a simple HTTP API for synthesis. Audio files are stored in MinIO and returned as presigned URLs, or streamed directly depending on the request.
+A FastAPI service that wraps [VieNeu TTS v3 Turbo](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v3-Turbo) — a Vietnamese neural text-to-speech model (48 kHz) — and exposes a simple HTTP API for synthesis. Inference runs in-process (ONNX on CPU, PyTorch on GPU). Audio files are stored in MinIO and returned as presigned URLs, or streamed directly depending on the request.
 
 ## Architecture
 
 ```
-Client → cloudflared → synthesize (FastAPI :8000) → vieneu-tts (inference :23333)
-                                                   ↘ minio (storage :9000)
+Client → cloudflared → synthesize (FastAPI :8000, in-process TTS)
+                                  ↘ minio (storage :9000)
 ```
 
 | Service | Image | Role |
 |---|---|---|
-| `vieneu-tts` | `pnnbao/vieneu-tts:latest` | GPU inference engine (OpenAI-compatible API) |
-| `synthesize` | local build | FastAPI wrapper, stores output to MinIO |
+| `synthesize` | local build | FastAPI wrapper with in-process VieNeu v3 Turbo inference, stores output to MinIO |
 | `minio` | `minio/minio:latest` | S3-compatible object store for audio files |
 | `minio-init` | `minio/mc:latest` | One-shot bucket initialiser |
 | `cloudflared` | `cloudflare/cloudflared:latest` | Cloudflare Tunnel for secure external access |
@@ -20,7 +19,8 @@ Client → cloudflared → synthesize (FastAPI :8000) → vieneu-tts (inference 
 ## Requirements
 
 - Docker with Compose v2
-- NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+
+No GPU is required — v3 Turbo runs in real time on CPU via ONNX Runtime (int8). The model weights are downloaded from Hugging Face on first start and cached in the `huggingface_cache` volume.
 
 ## Quick Start
 
@@ -65,9 +65,11 @@ List available preset voices.
 
 ```json
 [
-  { "id": "Doan", "description": "..." }
+  { "id": "Phạm Tuyên", "description": "Phạm Tuyên — Nam · Bắc · Phong cách tự nhiên" }
 ]
 ```
+
+v3 Turbo ships 14 preset voices covering the North, Central, and South regions, e.g. `Phạm Tuyên`, `Đoan Trang`, `Trúc Ly`, `Minh Đức`, `Xuân Vĩnh`, `Ngọc Trân`.
 
 ### `POST /api/synthesize`
 
@@ -77,9 +79,10 @@ Synthesize speech from text.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `text` | string | required | Text to synthesize |
-| `voice` | string | `Doan` | Preset voice ID |
-| `emotion` | string | `natural` | Emotion tag |
+| `text` | string | required | Text to synthesize. Supports inline emotion tags: `[cười]` (laugh), `[thở dài]` (sigh), `[hắng giọng]` (clear throat) |
+| `voice` | string | `Đoan Trang` | Preset voice ID |
+| `style` | string | `tu_nhien` | Reading style: `tu_nhien` (natural), `tin_tuc` (news), `doc_truyen` (storytelling) |
+| `emotion` | string | — | Legacy v2 field; `natural`/`news`/`storytelling` are mapped to the equivalent `style` |
 | `stream` | bool | `false` | Stream WAV bytes directly instead of uploading |
 | `correlation_id` | string | auto (UUID v4) | Client-supplied trace ID; used as the object name in MinIO |
 
@@ -100,7 +103,7 @@ Synthesize speech from text.
 curl -X POST http://localhost:8000/api/synthesize \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-secret-key" \
-  -d '{"text": "Xin chào thế giới", "voice": "Doan", "stream": false}'
+  -d '{"text": "Xin chào thế giới", "voice": "Đoan Trang", "stream": false}'
 ```
 
 ## Configuration
@@ -110,10 +113,10 @@ All settings are passed as environment variables (or via `.env`):
 | Variable | Default | Description |
 |---|---|---|
 | `API_KEY` | _(empty — auth disabled)_ | Key required in `X-API-Key` header for `/api/*` routes |
-| `REMOTE_API_BASE` | `http://vieneu-tts:23333/v1` | VieNeu inference endpoint |
-| `REMOTE_MODEL_ID` | `pnnbao-ump/VieNeu-TTS-v2` | Model identifier |
-| `DEFAULT_VOICE` | `Doan` | Fallback voice if none supplied |
-| `DEFAULT_EMOTION` | `natural` | Fallback emotion if none supplied |
+| `TTS_BACKEND` | `auto` | `onnx` (CPU), `pytorch` (GPU), or `auto` (picks by CUDA availability) |
+| `TTS_PRECISION` | `int8` | ONNX/CPU backbone precision: `int8` (fast, small) or `fp32` (max quality) |
+| `DEFAULT_VOICE` | `Đoan Trang` | Fallback voice if none supplied |
+| `DEFAULT_STYLE` | `tu_nhien` | Fallback reading style if none supplied |
 | `MINIO_ENDPOINT` | `minio:9000` | MinIO internal host:port |
 | `MINIO_ACCESS_KEY` | `admin` | MinIO access key |
 | `MINIO_SECRET_KEY` | `p@ssw0rd` | MinIO secret key |

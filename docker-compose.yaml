@@ -1,17 +1,4 @@
 services:
-  vieneu-tts:
-    image: pnnbao/vieneu-tts:latest
-    volumes:
-      - huggingface_cache:/root/.cache/huggingface
-    command: ["--tunnel"]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
   minio:
     image: minio/minio:latest
     ports:
@@ -45,11 +32,11 @@ services:
     build: .
     ports:
       - "127.0.0.1:8000:8000"
+    volumes:
+      - huggingface_cache:/root/.cache/huggingface
     environment:
-      - REMOTE_API_BASE=http://vieneu-tts:23333/v1
-      - REMOTE_MODEL_ID=pnnbao-ump/VieNeu-TTS-v2
-      - DEFAULT_EMOTION=natural
-      - DEFAULT_VOICE=Doan
+      - DEFAULT_STYLE=doc_truyen
+      - DEFAULT_VOICE=Đoan Trang
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=admin
       - MINIO_SECRET_KEY=p@ssw0rd
@@ -61,10 +48,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 15s
+      start_period: 300s
     depends_on:
-      vieneu-tts:
-        condition: service_started
       minio:
         condition: service_healthy
 
